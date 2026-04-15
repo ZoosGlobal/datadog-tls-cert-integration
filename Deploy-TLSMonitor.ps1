@@ -9,7 +9,7 @@
 #
 # ==============================================================================
 #  Script    : Datadog TLS Certificate Monitor - Deployment Script
-#  Version   : 2.0.0
+#  Version   : 2.1.0
 #  Purpose   : Automated TLS certificate monitoring deployment for Datadog
 #              1.  Validates Datadog Agent is installed and running
 #              2.  Scans Windows Certificate Stores (Personal, Root, CA)
@@ -34,6 +34,7 @@
 #
 #              Optional parameters:
 #              -DryRun    Generate conf.yaml only, skip agent restart
+#              -LogPath   Custom log directory (default: C:\scripts\TLSMonitor\logs)
 #
 #  Platform  : Windows Server 2016 / 2019 / 2022 / 2025
 #  Requires  : Datadog Agent already installed
@@ -44,8 +45,10 @@
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
 
+[CmdletBinding()]
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$LogPath = 'C:\scripts\TLSMonitor\logs'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,62 +56,61 @@ $ErrorActionPreference = 'Stop'
 # ==============================================================================
 #  Configuration
 # ==============================================================================
-$ScriptRoot   = 'C:\scripts\TLSMonitor'
-$ExportBase   = "$ScriptRoot\certs"
-$LogPath      = "$ScriptRoot\logs"
-$ReportPath   = "$ScriptRoot\reports"
-$ConfPath     = 'C:\ProgramData\Datadog\conf.d\tls.d\conf.yaml'
-$AgentExe     = 'C:\Program Files\Datadog\Datadog Agent\bin\agent.exe'
-$AgentSvc     = 'datadogagent'
-$DaysWarning  = 30
-$DaysCritical = 14
-$Timeout      = 10
-$AllowedTLS   = @('TLSv1.2', 'TLSv1.3')
-$Version      = '2.0.0'
+$Config = @{
+    ExportBase   = 'C:\scripts\TLSMonitor\certs'
+    ReportPath   = 'C:\scripts\TLSMonitor\reports'
+    ConfPath     = 'C:\ProgramData\Datadog\conf.d\tls.d\conf.yaml'
+    AgentExe     = 'C:\Program Files\Datadog\Datadog Agent\bin\agent.exe'
+    AgentService = 'datadogagent'
+    DaysWarning  = 30
+    DaysCritical = 14
+    Timeout      = 10
+    AllowedTLS   = @('TLSv1.2', 'TLSv1.3')
+    StoresToScan = @(
+        'Cert:\LocalMachine\My',     # Personal
+        'Cert:\LocalMachine\Root',   # Trusted Root CAs
+        'Cert:\LocalMachine\CA'      # Intermediate CAs
+    )
+}
 
-$StoresToScan = @(
-    'Cert:\LocalMachine\My',
-    'Cert:\LocalMachine\Root',
-    'Cert:\LocalMachine\CA'
-)
-
-$Hostname = $env:COMPUTERNAME
-$RunTime  = Get-Date -Format 'yyyyMMdd_HHmmss'
-$SEP      = '=' * 70
-$SEP2     = '-' * 60
+$ScriptVersion = '2.1.0'
+$Hostname      = $env:COMPUTERNAME
+$RunTime       = Get-Date -Format 'yyyyMMdd_HHmmss'
+$SEP           = '=' * 70
+$SEP2          = '-' * 60
 
 # ==============================================================================
-#  Bootstrap - create directories
+#  Bootstrap directories
 # ==============================================================================
-foreach ($dir in @($ScriptRoot, $ExportBase, $LogPath, $ReportPath)) {
+foreach ($dir in @($LogPath, $Config.ExportBase, $Config.ReportPath)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 
-$LogFile = "$LogPath\TLSMonitor_${Hostname}_${RunTime}.log"
+$LogFile = "$LogPath\DatadogTLS_${Hostname}_${RunTime}.log"
 
 # ==============================================================================
 #  Helper functions
 # ==============================================================================
 function Write-Log {
-    param([string]$Message, [string]$Level = 'INFO')
+    param(
+        [string]$Message,
+        [ValidateSet('INFO','WARN','ERROR','SUCCESS','DEBUG')]
+        [string]$Level = 'INFO'
+    )
     $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line = "[$ts] [$Level] [$Hostname] $Message"
+    $line = "[$ts] [$Level] $Message"
     switch ($Level) {
-        'INFO'    { Write-Host "  [ .. ] $Message" -ForegroundColor Cyan }
-        'SUCCESS' { Write-Host "  [ OK ] $Message" -ForegroundColor Green }
-        'WARN'    { Write-Host "  [WARN] $Message" -ForegroundColor Yellow }
-        'ERROR'   { Write-Host "  [FAIL] $Message" -ForegroundColor Red }
-        'DEBUG'   { Write-Host "  [    ] $Message" -ForegroundColor Gray }
+        'INFO'    { Write-Host "  [ .. ] $Message" -ForegroundColor Cyan    }
+        'SUCCESS' { Write-Host "  [ OK ] $Message" -ForegroundColor Green   }
+        'WARN'    { Write-Host "  [WARN] $Message" -ForegroundColor Yellow  }
+        'ERROR'   { Write-Host "  [FAIL] $Message" -ForegroundColor Red     }
+        'DEBUG'   { Write-Host "  [    ] $Message" -ForegroundColor Gray    }
     }
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
 }
 
 function Write-Step {
-    param(
-        [int]$n,
-        [int]$total,
-        [string]$msg
-    )
+    param([int]$n, [int]$total, [string]$msg)
     Write-Host ''
     Write-Host "  [$n/$total] $msg" -ForegroundColor Yellow
     Write-Host "  $SEP2" -ForegroundColor DarkGray
@@ -121,7 +123,7 @@ Clear-Host
 Write-Host ''
 Write-Host $SEP -ForegroundColor Cyan
 Write-Host '  ZOOS GLOBAL -- Datadog TLS Certificate Monitor' -ForegroundColor Cyan
-Write-Host "  Version  : $Version" -ForegroundColor Cyan
+Write-Host "  Version  : $ScriptVersion" -ForegroundColor Cyan
 Write-Host $SEP -ForegroundColor Cyan
 Write-Host '  Author   : Shivam Anand  |  Sr. DevOps Engineer'
 Write-Host '  Org      : Zoos Global   |  Datadog Premium Partner'
@@ -131,41 +133,50 @@ Write-Host $SEP
 Write-Host ''
 Write-Host "  Host     : $Hostname"
 Write-Host "  DryRun   : $DryRun"
-Write-Host "  Stores   : $($StoresToScan.Count) stores to scan"
-Write-Host "  Warn/Crit: ${DaysWarning}d / ${DaysCritical}d"
+Write-Host "  Stores   : $($Config.StoresToScan.Count) stores to scan"
+Write-Host "  Warn/Crit: $($Config.DaysWarning)d / $($Config.DaysCritical)d"
 Write-Host ''
 
-$TotalSteps = 5
+$TotalSteps = 6
 
 # ==============================================================================
-#  STEP 1 - Validate Datadog Agent
+#  STEP 1 - Prerequisites
 # ==============================================================================
-Write-Step 1 $TotalSteps 'Validating Datadog Agent...'
+Write-Step 1 $TotalSteps 'Validating prerequisites...'
 
-try {
-    $svc = Get-Service -Name $AgentSvc -ErrorAction Stop
-    if ($svc.Status -eq 'Running') {
-        Write-Log "Datadog Agent is running (Status: $($svc.Status))" 'SUCCESS'
-    } else {
-        Write-Log "Datadog Agent not running (Status: $($svc.Status)) - attempting start..." 'WARN'
-        Start-Service -Name $AgentSvc
-        Start-Sleep -Seconds 5
-        if ((Get-Service -Name $AgentSvc).Status -ne 'Running') {
-            Write-Log 'Datadog Agent could not be started.' 'ERROR'
-            exit 1
-        }
-        Write-Log 'Datadog Agent started successfully.' 'SUCCESS'
-    }
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $isAdmin) {
+    Write-Log 'Script must be run as Administrator.' 'ERROR'
+    exit 1
+}
 
-    if (Test-Path $AgentExe) {
-        $agentVer = & $AgentExe version 2>$null | Select-Object -First 1
-        Write-Log "Agent version : $agentVer" 'INFO'
-    }
-} catch {
-    Write-Log "Datadog Agent service not found: $_" 'ERROR'
+if (-not (Test-Path $Config.AgentExe)) {
+    Write-Log "Datadog Agent not found at: $($Config.AgentExe)" 'ERROR'
     Write-Log 'Install from: https://s3.amazonaws.com/ddagent-windows-stable/datadog-agent-7-latest.amd64.msi' 'INFO'
     exit 1
 }
+
+$svc = Get-Service -Name $Config.AgentService -ErrorAction SilentlyContinue
+if (-not $svc) {
+    Write-Log "Datadog Agent service '$($Config.AgentService)' not found." 'ERROR'
+    exit 1
+}
+
+if ($svc.Status -ne 'Running') {
+    Write-Log "Agent not running - attempting start..." 'WARN'
+    Start-Service -Name $Config.AgentService
+    Start-Sleep -Seconds 6
+    if ((Get-Service -Name $Config.AgentService).Status -ne 'Running') {
+        Write-Log 'Datadog Agent could not be started.' 'ERROR'
+        exit 1
+    }
+}
+
+$agentVer = & $Config.AgentExe version 2>$null | Select-Object -First 1
+Write-Log "Agent        : $agentVer" 'SUCCESS'
+Write-Log 'Prerequisites passed.' 'SUCCESS'
 
 # ==============================================================================
 #  STEP 2 - Backup existing conf.yaml
@@ -173,26 +184,27 @@ try {
 Write-Step 2 $TotalSteps 'Backing up existing conf.yaml...'
 
 $BackupPath = $null
-if (Test-Path $ConfPath) {
-    $BackupPath = "$ConfPath.bak_$RunTime"
-    Copy-Item -Path $ConfPath -Destination $BackupPath -Force
+if (Test-Path $Config.ConfPath) {
+    $BackupPath = "$($Config.ConfPath).bak_$RunTime"
+    Copy-Item -Path $Config.ConfPath -Destination $BackupPath -Force
     Write-Log "Backup created : $BackupPath" 'SUCCESS'
 } else {
     Write-Log 'No existing conf.yaml found - skipping backup.' 'INFO'
 }
 
 # ==============================================================================
-#  STEP 3 - Scan and export certificates
+#  STEP 3 - Scan & Export certificates from Windows Certificate Stores
 # ==============================================================================
 Write-Step 3 $TotalSteps 'Scanning Windows Certificate Stores...'
 
-$instances = @()
-$exported  = 0
-$skipped   = 0
+$instances    = @()
+$totalStores  = 0
+$totalCerts   = 0
+$skippedCerts = 0
 
-foreach ($storePath in $StoresToScan) {
+foreach ($storePath in $Config.StoresToScan) {
     $storeName = $storePath -replace 'Cert:\\', '' -replace '\\', '_'
-    $storeDir  = "$ExportBase\$storeName"
+    $storeDir  = "$($Config.ExportBase)\$storeName"
     New-Item -ItemType Directory -Force -Path $storeDir | Out-Null
 
     try {
@@ -208,16 +220,15 @@ foreach ($storePath in $StoresToScan) {
     }
 
     Write-Log "Store $storeName - $($certs.Count) cert(s)" 'SUCCESS'
+    $totalStores++
 
     foreach ($cert in $certs) {
         try {
             $safeName = ($cert.Subject -replace '[^a-zA-Z0-9]', '_')
-            if ([string]::IsNullOrWhiteSpace($safeName)) {
-                $safeName = 'cert'
-            }
-            $safeName = $safeName.Substring(0, [Math]::Min(50, $safeName.Length)).TrimEnd('_')
+            if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = 'cert' }
+            $safeName   = $safeName.Substring(0, [Math]::Min(50, $safeName.Length)).TrimEnd('_')
             $thumbShort = $cert.Thumbprint.Substring(0, 8)
-            $filePath = "$storeDir\${safeName}-${thumbShort}.cer"
+            $filePath   = "$storeDir\${safeName}-${thumbShort}.cer"
 
             [System.IO.File]::WriteAllBytes(
                 $filePath,
@@ -233,43 +244,44 @@ foreach ($storePath in $StoresToScan) {
                 subject         = $cert.Subject
                 expiry          = $cert.NotAfter
                 thumbprint      = $cert.Thumbprint
+                issuer          = $cert.Issuer
                 daysLeft        = $daysLeft
             }
-            $exported++
+            $totalCerts++
         } catch {
             Write-Log "Skipped '$($cert.Subject)': $_" 'WARN'
-            $skipped++
+            $skippedCerts++
         }
     }
 }
 
-Write-Log "Scan complete - Exported: $exported | Skipped: $skipped" 'SUCCESS'
+Write-Log "Scan complete - Stores: $totalStores | Exported: $totalCerts | Skipped: $skippedCerts" 'SUCCESS'
 
-if ($exported -eq 0) {
-    Write-Log 'No certificates found on this host. Exiting.' 'WARN'
+if ($totalCerts -eq 0) {
+    Write-Log 'No certificates exported. Nothing to deploy.' 'WARN'
     exit 0
 }
 
 # ==============================================================================
 #  STEP 4 - Generate conf.yaml
 # ==============================================================================
-Write-Step 4 $TotalSteps "Generating conf.yaml ($exported instances)..."
+Write-Step 4 $TotalSteps "Generating conf.yaml ($totalCerts instances)..."
 
-$allowedYaml = ($AllowedTLS | ForEach-Object { "    - $_" }) -join "`n"
+$allowedVersionsYaml = ($Config.AllowedTLS | ForEach-Object { "    - $_" }) -join "`n"
 
 $yaml = @"
 # ==============================================================================
 #  Zoos Global -- Datadog TLS Certificate Monitoring Configuration
 #  Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 #  Host       : $Hostname
-#  Version    : $Version
-#  Total Certs: $exported
+#  Version    : $ScriptVersion
+#  Total Certs: $totalCerts
 #  Contact    : shivam.anand@zoosglobal.com
 # ==============================================================================
 
 init_config:
   allowed_versions:
-$allowedYaml
+$allowedVersionsYaml
 
 instances:
 "@
@@ -278,16 +290,17 @@ foreach ($inst in $instances) {
     $expiryStr = $inst.expiry.ToString('yyyy-MM-dd')
     $yaml += @"
 
-  ## Store    : $($inst.store)
-  ## Subject  : $($inst.subject)
-  ## Expires  : $expiryStr ($($inst.daysLeft) days left)
-  ## Thumb    : $($inst.thumbprint)
+  ## Store      : $($inst.store)
+  ## Subject    : $($inst.subject)
+  ## Issuer     : $($inst.issuer)
+  ## Expires    : $expiryStr ($($inst.daysLeft) days left)
+  ## Thumbprint : $($inst.thumbprint)
   - server: localhost
     local_cert_path: $($inst.local_cert_path)
     name: $($inst.name)
-    days_warning: $DaysWarning
-    days_critical: $DaysCritical
-    timeout: $Timeout
+    days_warning: $($Config.DaysWarning)
+    days_critical: $($Config.DaysCritical)
+    timeout: $($Config.Timeout)
     tls_validate_hostname: false
     tags:
       - cert_store:$($inst.store)
@@ -296,109 +309,109 @@ foreach ($inst in $instances) {
 "@
 }
 
-New-Item -ItemType Directory -Force -Path (Split-Path $ConfPath) | Out-Null
-$yaml | Out-File $ConfPath -Encoding UTF8
-Write-Log "conf.yaml written : $ConfPath" 'SUCCESS'
+New-Item -ItemType Directory -Force -Path (Split-Path $Config.ConfPath) | Out-Null
+$yaml | Out-File $Config.ConfPath -Encoding UTF8
+Write-Log "conf.yaml written : $($Config.ConfPath)" 'SUCCESS'
 
 # ==============================================================================
-#  STEP 5 - Restart agent and validate (skip if DryRun)
+#  STEP 5 - Deploy to Datadog Agent
 # ==============================================================================
 Write-Step 5 $TotalSteps 'Deploying to Datadog Agent...'
 
 if ($DryRun) {
     Write-Log 'DryRun mode - skipping agent restart.' 'WARN'
-    Write-Log "Review conf.yaml at: $ConfPath" 'INFO'
+    Write-Log "Review conf.yaml at: $($Config.ConfPath)" 'INFO'
 } else {
     try {
-        Restart-Service -Name $AgentSvc -Force -ErrorAction Stop
+        Restart-Service -Name $Config.AgentService -Force -ErrorAction Stop
         Start-Sleep -Seconds 8
-        if ((Get-Service -Name $AgentSvc).Status -ne 'Running') {
-            throw 'Agent did not start.'
+        if ((Get-Service -Name $Config.AgentService).Status -ne 'Running') {
+            throw 'Agent did not start after restart.'
         }
         Write-Log 'Agent restarted successfully.' 'SUCCESS'
     } catch {
         Write-Log "Agent restart failed: $_" 'ERROR'
         if ($BackupPath -and (Test-Path $BackupPath)) {
-            Copy-Item -Path $BackupPath -Destination $ConfPath -Force
+            Copy-Item -Path $BackupPath -Destination $Config.ConfPath -Force
             Write-Log 'Config rolled back to previous backup.' 'WARN'
         }
         exit 1
     }
 
     Write-Log 'Running TLS check validation...' 'INFO'
-    $out = & $AgentExe check tls 2>&1
-    $ok  = ($out | Select-String '\[OK\]').Count
-    $err = ($out | Select-String '\[ERROR\]').Count
-    Write-Log "Validation - OK: $ok | ERROR: $err" $(if ($err -gt 0) { 'WARN' } else { 'SUCCESS' })
+    $checkOutput  = & $Config.AgentExe check tls 2>&1
+    $okCount      = ($checkOutput | Select-String '\[OK\]').Count
+    $errCount     = ($checkOutput | Select-String '\[ERROR\]').Count
+    Write-Log "Validation - OK: $okCount | ERROR: $errCount" $(if ($errCount -gt 0) { 'WARN' } else { 'SUCCESS' })
 }
 
 # ==============================================================================
-#  Plain text report
+#  STEP 6 - Plain text report + summary
 # ==============================================================================
-$reportFile = "$ReportPath\TLSReport_${Hostname}_${RunTime}.txt"
-$critical = ($instances | Where-Object { $_.daysLeft -le $DaysCritical }).Count
-$warning  = ($instances | Where-Object { $_.daysLeft -le $DaysWarning -and $_.daysLeft -gt $DaysCritical }).Count
-$healthy  = ($instances | Where-Object { $_.daysLeft -gt $DaysWarning }).Count
+Write-Step 6 $TotalSteps 'Generating report and summary...'
 
-$reportLines = @()
+$critical    = ($instances | Where-Object { $_.daysLeft -le $Config.DaysCritical }).Count
+$warning     = ($instances | Where-Object { $_.daysLeft -le $Config.DaysWarning -and $_.daysLeft -gt $Config.DaysCritical }).Count
+$healthy     = ($instances | Where-Object { $_.daysLeft -gt $Config.DaysWarning }).Count
+$expiringSoon = $instances | Where-Object { $_.daysLeft -le $Config.DaysWarning } | Sort-Object daysLeft
+$reportFile  = "$($Config.ReportPath)\TLSReport_${Hostname}_${RunTime}.txt"
+
+$reportLines  = @()
 $reportLines += $SEP
-$reportLines += 'Zoos Global - TLS Certificate Inventory'
+$reportLines += '  Zoos Global - TLS Certificate Inventory'
+$reportLines += "  Version   : $ScriptVersion"
 $reportLines += $SEP
-$reportLines += "Host        : $Hostname"
-$reportLines += "Generated   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-$reportLines += "Version     : $Version"
-$reportLines += "Total Certs : $exported"
-$reportLines += "Critical    : $critical"
-$reportLines += "Warning     : $warning"
-$reportLines += "Healthy     : $healthy"
+$reportLines += "  Host      : $Hostname"
+$reportLines += "  Generated : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+$reportLines += "  Total     : $totalCerts"
+$reportLines += "  Critical  : $critical"
+$reportLines += "  Warning   : $warning"
+$reportLines += "  Healthy   : $healthy"
+$reportLines += $SEP
 $reportLines += ''
-$reportLines += 'Certificate Details:'
+$reportLines += '  Certificate Details:'
 $reportLines += $SEP2
 
 foreach ($item in ($instances | Sort-Object daysLeft)) {
-    $status = if ($item.daysLeft -le $DaysCritical) { 'CRITICAL' }
-              elseif ($item.daysLeft -le $DaysWarning) { 'WARNING' }
+    $status = if ($item.daysLeft -le $Config.DaysCritical) { 'CRITICAL' }
+              elseif ($item.daysLeft -le $Config.DaysWarning) { 'WARNING' }
               else { 'HEALTHY' }
-
-    $reportLines += "Name       : $($item.name)"
-    $reportLines += "Store      : $($item.store)"
-    $reportLines += "Subject    : $($item.subject)"
-    $reportLines += "Expiry     : $($item.expiry.ToString('yyyy-MM-dd'))"
-    $reportLines += "Days Left  : $($item.daysLeft)"
-    $reportLines += "Thumbprint : $($item.thumbprint)"
-    $reportLines += "Cert Path  : $($item.local_cert_path)"
-    $reportLines += "Status     : $status"
+    $reportLines += "  Name       : $($item.name)"
+    $reportLines += "  Store      : $($item.store)"
+    $reportLines += "  Subject    : $($item.subject)"
+    $reportLines += "  Issuer     : $($item.issuer)"
+    $reportLines += "  Expiry     : $($item.expiry.ToString('yyyy-MM-dd'))"
+    $reportLines += "  Days Left  : $($item.daysLeft)"
+    $reportLines += "  Thumbprint : $($item.thumbprint)"
+    $reportLines += "  Cert Path  : $($item.local_cert_path)"
+    $reportLines += "  Status     : $status"
     $reportLines += $SEP2
 }
 
 $reportLines | Out-File $reportFile -Encoding UTF8
 Write-Log "Text report : $reportFile" 'SUCCESS'
 
-# ==============================================================================
-#  Final Summary
-# ==============================================================================
-$expiring = $instances | Where-Object { $_.daysLeft -le $DaysWarning } | Sort-Object daysLeft
-
+# Final summary to console
 Write-Host ''
 Write-Host $SEP -ForegroundColor Green
 Write-Host '  DEPLOYMENT COMPLETE' -ForegroundColor Green
 Write-Host $SEP -ForegroundColor Green
 Write-Host ''
 Write-Host "  Host        : $Hostname"
-Write-Host "  Total Certs : $exported"
+Write-Host "  Total Certs : $totalCerts"
 Write-Host "  Critical    : $critical" -ForegroundColor $(if ($critical -gt 0) { 'Red' } else { 'Green' })
 Write-Host "  Warning     : $warning"  -ForegroundColor $(if ($warning -gt 0) { 'Yellow' } else { 'Green' })
 Write-Host "  Healthy     : $healthy"  -ForegroundColor Green
-Write-Host "  Config      : $ConfPath"
+Write-Host "  Config      : $($Config.ConfPath)"
 Write-Host "  Report      : $reportFile"
 Write-Host "  Log         : $LogFile"
 Write-Host ''
 
-if ($expiring.Count -gt 0) {
+if ($expiringSoon.Count -gt 0) {
     Write-Host '  Certs expiring soon:' -ForegroundColor Yellow
-    $expiring | ForEach-Object {
-        $color = if ($_.daysLeft -le $DaysCritical) { 'Red' } else { 'Yellow' }
-        Write-Host "    -> $($_.name)  |  $($_.expiry.ToString('yyyy-MM-dd'))  ($($_.daysLeft) days)" -ForegroundColor $color
+    foreach ($e in $expiringSoon) {
+        $col = if ($e.daysLeft -le $Config.DaysCritical) { 'Red' } else { 'Yellow' }
+        Write-Host "    -> $($e.name)  |  $($e.expiry.ToString('yyyy-MM-dd'))  ($($e.daysLeft) days)" -ForegroundColor $col
     }
     Write-Host ''
 }

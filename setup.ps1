@@ -9,17 +9,16 @@
 #
 # ==============================================================================
 #  Script    : Zoos Global TLS Monitor - Setup Script
-#  Version   : 2.0.0
+#  Version   : 2.1.0
 #  Purpose   : Fully automated one-time setup per host
 #              1.  Validates Datadog Agent is installed and running
 #              2.  Creates C:\scripts\TLSMonitor directory structure
 #              3.  Copies Deploy-TLSMonitor.ps1 to destination
 #              4.  Unblocks scripts (removes Zone.Identifier)
-#              5.  Enables Windows Certificate Lifecycle event log
-#              6.  Runs Deploy-TLSMonitor.ps1 immediately (first run)
-#              7.  Registers EVENT-DRIVEN task (fires on cert install)
-#              8.  Registers FALLBACK task (every 7 days at 02:00)
-#              9.  Prints final status summary
+#              5.  Runs Deploy-TLSMonitor.ps1 immediately (first run)
+#              6.  Creates weekly Scheduled Task in root Task Scheduler
+#                  (every Sunday at 02:00 AM, NT AUTHORITY\SYSTEM)
+#              7.  Prints final status summary
 # ------------------------------------------------------------------------------
 #  Author    : Shivam Anand
 #  Title     : Sr. DevOps Engineer | Engineering
@@ -33,11 +32,9 @@
 #
 #              PowerShell.exe -ExecutionPolicy Bypass -File .\setup.ps1
 #
-#  Scaling   : Two triggers registered per host:
-#              EVENT  - fires automatically when any cert is installed
-#                       (Windows Event ID 1006, no polling delay)
-#              WEEKLY - fallback every Sunday at 02:00 AM
-#                       (catches certs missed by event trigger)
+#  Task      : Task is created in the DEFAULT root Task Scheduler Library.
+#              No custom folder/subpath is used. This avoids path duplication
+#              and event-trigger type mismatch issues on all Windows versions.
 #
 #  Platform  : Windows Server 2016 / 2019 / 2022 / 2025
 #  Requires  : Datadog Agent already installed
@@ -53,26 +50,22 @@ $ErrorActionPreference = 'Stop'
 # ==============================================================================
 #  Configuration
 # ==============================================================================
-$ScriptsDir    = 'C:\scripts\TLSMonitor'
-$SourceScript  = 'Deploy-TLSMonitor.ps1'
-$TargetScript  = "$ScriptsDir\Deploy-TLSMonitor.ps1"
-$LogPath       = "$ScriptsDir\logs"
-$AgentSvc      = 'datadogagent'
-$TaskFolder    = '\ZoosGlobal'
-$TaskEvent     = 'ZoosGlobal-TLS-CertInstall-Trigger'
-$TaskFallback  = 'ZoosGlobal-TLS-Weekly-Fallback'
-$Version       = '2.0.0'
-
-# Windows Event that fires when a cert is added to ANY local store
-# Log: Microsoft-Windows-CertificateServicesClient-Lifecycle-System/Operational
-# Event ID 1006 = certificate added
-$CertEventLog  = 'Microsoft-Windows-CertificateServicesClient-Lifecycle-System/Operational'
-$CertEventId   = 1006
+$ScriptsDir   = 'C:\scripts\TLSMonitor'
+$SourceScript = 'Deploy-TLSMonitor.ps1'
+$TargetScript = "$ScriptsDir\Deploy-TLSMonitor.ps1"
+$LogPath      = "$ScriptsDir\logs"
+$AgentSvc     = 'datadogagent'
+$TaskName     = 'ZoosGlobal-TLS-Weekly-Fallback'
+$TaskDesc     = 'Zoos Global TLS Monitor - weekly cert scan every Sunday at 02:00 AM, runs as SYSTEM'
+$Version      = '2.1.0'
+$TotalSteps   = 7
 
 $SEP  = '=' * 70
 $SEP2 = '-' * 60
-$TotalSteps = 9
 
+# ==============================================================================
+#  Bootstrap log directory
+# ==============================================================================
 New-Item -ItemType Directory -Force -Path $LogPath | Out-Null
 $SetupLog = "$LogPath\Setup_$($env:COMPUTERNAME)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
@@ -93,11 +86,7 @@ function Write-Log {
 }
 
 function Write-Step {
-    param(
-        [int]$n,
-        [int]$total,
-        [string]$msg
-    )
+    param([int]$n, [int]$total, [string]$msg)
     Write-Host ''
     Write-Host "  [$n/$total] $msg" -ForegroundColor Yellow
     Write-Host "  $SEP2" -ForegroundColor DarkGray
@@ -120,10 +109,10 @@ Write-Host $SEP
 Write-Host ''
 Write-Host '  Config:'
 Write-Host "    Install path : $ScriptsDir"
-Write-Host "    Task (event) : $TaskEvent"
-Write-Host "    Task (weekly): $TaskFallback"
-Write-Host "    Trigger 1    : On cert install (Event ID $CertEventId) - instant"
-Write-Host '    Trigger 2    : Every Sunday @ 02:00 AM - fallback'
+Write-Host "    Task name    : $TaskName"
+Write-Host '    Task folder  : Root (Task Scheduler Library)'
+Write-Host '    Trigger      : Every Sunday @ 02:00 AM'
+Write-Host '    Runs as      : NT AUTHORITY\SYSTEM'
 Write-Host ''
 Write-Host '  Starting automated setup -- no input required...' -ForegroundColor Green
 Write-Host ''
@@ -131,13 +120,13 @@ Write-Host ''
 # ==============================================================================
 #  STEP 1 - Validate Datadog Agent
 # ==============================================================================
-Write-Step 1 $TotalSteps 'Checking Datadog Agent service...'
+Write-Step 1 $TotalSteps 'Validating Datadog Agent...'
 try {
     $svc = Get-Service -Name $AgentSvc -ErrorAction Stop
     if ($svc.Status -eq 'Running') {
         Write-Log "Datadog Agent is running (Status: $($svc.Status))" 'SUCCESS'
     } else {
-        Write-Log "Datadog Agent not running (Status: $($svc.Status)) - attempting start..." 'WARN'
+        Write-Log "Agent not running ($($svc.Status)) - attempting start..." 'WARN'
         Start-Service -Name $AgentSvc
         Start-Sleep -Seconds 6
         if ((Get-Service -Name $AgentSvc).Status -ne 'Running') {
@@ -146,6 +135,11 @@ try {
             exit 1
         }
         Write-Log 'Datadog Agent started successfully.' 'SUCCESS'
+    }
+    $agentExe = 'C:\Program Files\Datadog\Datadog Agent\bin\agent.exe'
+    if (Test-Path $agentExe) {
+        $ver = & $agentExe version 2>$null | Select-Object -First 1
+        Write-Log "Agent version : $ver" 'INFO'
     }
 } catch {
     Write-Log "Datadog Agent service not found: $_" 'ERROR'
@@ -156,7 +150,7 @@ try {
 # ==============================================================================
 #  STEP 2 - Create directory structure
 # ==============================================================================
-Write-Step 2 $TotalSteps "Creating directory: $ScriptsDir..."
+Write-Step 2 $TotalSteps "Creating directory structure in $ScriptsDir..."
 try {
     foreach ($dir in @($ScriptsDir, "$ScriptsDir\certs", "$ScriptsDir\logs", "$ScriptsDir\reports")) {
         if (Test-Path $dir) {
@@ -186,6 +180,7 @@ try {
     $copied = Get-Item $TargetScript
     Write-Log "Copied : $TargetScript" 'SUCCESS'
     Write-Log "Size   : $([math]::Round($copied.Length / 1KB, 2)) KB" 'INFO'
+    Write-Log "Date   : $($copied.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" 'INFO'
 } catch {
     Write-Log "Failed to copy script: $_" 'ERROR'
     exit 1
@@ -196,7 +191,12 @@ try {
 # ==============================================================================
 Write-Step 4 $TotalSteps 'Unblocking scripts (removing Zone.Identifier)...'
 try {
-    foreach ($f in @($TargetScript, $MyInvocation.MyCommand.Path, (Join-Path (Get-Location).Path $SourceScript))) {
+    $toUnblock = @(
+        $TargetScript,
+        $MyInvocation.MyCommand.Path,
+        (Join-Path (Get-Location).Path $SourceScript)
+    )
+    foreach ($f in $toUnblock) {
         if ($f -and (Test-Path $f)) {
             Unblock-File -Path $f -ErrorAction SilentlyContinue
             Write-Log "Unblocked: $f" 'SUCCESS'
@@ -207,28 +207,10 @@ try {
 }
 
 # ==============================================================================
-#  STEP 5 - Enable Certificate Lifecycle event log
+#  STEP 5 - Initial deployment (first run)
 # ==============================================================================
-Write-Step 5 $TotalSteps 'Enabling Certificate Lifecycle event log...'
-try {
-    $logObj = Get-WinEvent -ListLog $CertEventLog -ErrorAction Stop
-    if (-not $logObj.IsEnabled) {
-        wevtutil set-log $CertEventLog /enabled:true
-        Write-Log 'Certificate Lifecycle event log enabled.' 'SUCCESS'
-    } else {
-        Write-Log 'Certificate Lifecycle event log already enabled.' 'SUCCESS'
-    }
-    Write-Log "Event log  : $CertEventLog" 'INFO'
-    Write-Log "Trigger ID : Event $CertEventId (certificate added)" 'INFO'
-} catch {
-    Write-Log "Could not enable cert lifecycle log: $_ (non-fatal - event task will be registered anyway)" 'WARN'
-}
-
-# ==============================================================================
-#  STEP 6 - Run immediately (first deployment)
-# ==============================================================================
-Write-Step 6 $TotalSteps 'Running initial deployment...'
-Write-Log 'Executing Deploy-TLSMonitor.ps1 (first run)...' 'INFO'
+Write-Step 5 $TotalSteps 'Running initial deployment (first run)...'
+Write-Log 'Executing Deploy-TLSMonitor.ps1...' 'INFO'
 Write-Host ''
 
 & PowerShell.exe -ExecutionPolicy Bypass -NonInteractive -File $TargetScript
@@ -241,114 +223,71 @@ Write-Host ''
 Write-Log 'Initial deployment complete.' 'SUCCESS'
 
 # ==============================================================================
-#  Shared task components
+#  STEP 6 - Create Scheduled Task in root Task Scheduler Library
 # ==============================================================================
-$taskAction = New-ScheduledTaskAction `
-    -Execute 'PowerShell.exe' `
-    -Argument "-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetScript`""
-
-$taskSettings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
-    -StartWhenAvailable `
-    -MultipleInstances IgnoreNew `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 5) `
-    -RunOnlyIfNetworkAvailable:$false
-
-$taskPrincipal = New-ScheduledTaskPrincipal `
-    -UserId 'NT AUTHORITY\SYSTEM' `
-    -LogonType ServiceAccount `
-    -RunLevel Highest
-
-# ==============================================================================
-#  STEP 7 - Register EVENT-DRIVEN task (fires instantly on cert install)
-# ==============================================================================
-Write-Step 7 $TotalSteps "Registering event-driven task: '$TaskEvent'..."
-
-$existing = Get-ScheduledTask -TaskName $TaskEvent -TaskPath $TaskFolder -ErrorAction SilentlyContinue
-if ($existing) {
-    Unregister-ScheduledTask -TaskName $TaskEvent -TaskPath $TaskFolder -Confirm:$false
-    Write-Log 'Removed existing event task.' 'INFO'
-}
-
+Write-Step 6 $TotalSteps "Registering Scheduled Task in root: '$TaskName'..."
 try {
-    $eventTrigger = New-CimInstance -Namespace ROOT\Microsoft\Windows\TaskScheduler `
-        -ClassName MSFT_TaskEventTrigger `
-        -ClientOnly `
-        -Property @{
-            Enabled      = $true
-            Subscription = "<QueryList><Query Id='0' Path='$CertEventLog'><Select Path='$CertEventLog'>*[System[EventID=$CertEventId]]</Select></Query></QueryList>"
-            Delay        = 'PT30S'
-        }
+    # Remove existing task if present (clean re-register)
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Log "Removed existing task: $TaskName" 'INFO'
+    }
 
+    $taskAction = New-ScheduledTaskAction `
+        -Execute 'PowerShell.exe' `
+        -Argument "-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetScript`""
+
+    # Weekly trigger - every Sunday at 02:00 AM
+    $taskTrigger = New-ScheduledTaskTrigger `
+        -Weekly `
+        -WeeksInterval 1 `
+        -DaysOfWeek Sunday `
+        -At '02:00'
+
+    $taskSettings = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+        -StartWhenAvailable `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 5) `
+        -RunOnlyIfNetworkAvailable:$false
+
+    $taskPrincipal = New-ScheduledTaskPrincipal `
+        -UserId 'NT AUTHORITY\SYSTEM' `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+
+    # No -TaskPath = task goes to root Task Scheduler Library
     Register-ScheduledTask `
-        -TaskName $TaskEvent `
-        -TaskPath $TaskFolder `
+        -TaskName $TaskName `
         -Action $taskAction `
-        -Trigger $eventTrigger `
+        -Trigger $taskTrigger `
         -Settings $taskSettings `
         -Principal $taskPrincipal `
-        -Description "Zoos Global - Fires instantly when a certificate is installed (Event ID $CertEventId). Updates Datadog TLS monitoring config automatically." | Out-Null
+        -Description $TaskDesc `
+        -Force | Out-Null
 
-    Write-Log "Event task registered : $TaskFolder$TaskEvent" 'SUCCESS'
-    Write-Log 'Trigger               : On cert install (Event ID 1006) + 30s delay' 'INFO'
+    $task     = Get-ScheduledTask -TaskName $TaskName
+    $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
+
+    Write-Log "Task created : $TaskName" 'SUCCESS'
+    Write-Log 'Task folder  : Root (Task Scheduler Library)' 'INFO'
+    Write-Log "Next run     : $($taskInfo.NextRunTime)" 'INFO'
+    Write-Log "State        : $($task.State)" 'INFO'
+
 } catch {
-    Write-Log "Event task registration warning: $_ (falling back to weekly task only)" 'WARN'
-}
-
-# ==============================================================================
-#  STEP 8 - Register FALLBACK WEEKLY task (every Sunday at 02:00)
-# ==============================================================================
-Write-Step 8 $TotalSteps "Registering weekly fallback task: '$TaskFallback'..."
-
-$existing = Get-ScheduledTask -TaskName $TaskFallback -TaskPath $TaskFolder -ErrorAction SilentlyContinue
-if ($existing) {
-    Unregister-ScheduledTask -TaskName $TaskFallback -TaskPath $TaskFolder -Confirm:$false
-    Write-Log 'Removed existing fallback task.' 'INFO'
-}
-
-try {
-    $weeklyTrigger = New-ScheduledTaskTrigger `
-        -Weekly -WeeksInterval 1 -DaysOfWeek Sunday -At '02:00'
-
-    Register-ScheduledTask `
-        -TaskName $TaskFallback `
-        -TaskPath $TaskFolder `
-        -Action $taskAction `
-        -Trigger $weeklyTrigger `
-        -Settings $taskSettings `
-        -Principal $taskPrincipal `
-        -Description 'Zoos Global - Weekly fallback scan every Sunday at 02:00. Catches any certificates missed by the event-driven trigger.' | Out-Null
-
-    Write-Log "Fallback task registered : $TaskFolder$TaskFallback" 'SUCCESS'
-    Write-Log 'Trigger                  : Every Sunday at 02:00 AM' 'INFO'
-} catch {
-    Write-Log "Fallback task registration failed: $_" 'ERROR'
+    Write-Log "Failed to create scheduled task: $_" 'ERROR'
     exit 1
 }
 
 # ==============================================================================
-#  STEP 9 - Verify tasks
+#  STEP 7 - Final summary
 # ==============================================================================
-Write-Step 9 $TotalSteps 'Verifying scheduled tasks...'
+Write-Step 7 $TotalSteps 'Printing final status summary...'
 
-$infoEvent    = Get-ScheduledTaskInfo -TaskName $TaskEvent -TaskPath $TaskFolder -ErrorAction SilentlyContinue
-$infoFallback = Get-ScheduledTaskInfo -TaskName $TaskFallback -TaskPath $TaskFolder -ErrorAction SilentlyContinue
+$taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
 
-if ($infoEvent) {
-    Write-Log 'Event task    : registered and ready' 'SUCCESS'
-} else {
-    Write-Log 'Event task    : could not be verified (check Task Scheduler manually)' 'WARN'
-}
-if ($infoFallback) {
-    Write-Log "Fallback task : registered - next run $($infoFallback.NextRunTime)" 'SUCCESS'
-} else {
-    Write-Log 'Fallback task : could not be verified' 'WARN'
-}
-
-# ==============================================================================
-#  Final Summary
-# ==============================================================================
 Write-Host ''
 Write-Host $SEP -ForegroundColor Green
 Write-Host '  SETUP COMPLETE -- All steps passed' -ForegroundColor Green
@@ -359,28 +298,23 @@ Write-Host "    Host          : $($env:COMPUTERNAME)"
 Write-Host "    Script path   : $TargetScript"
 Write-Host "    Setup log     : $SetupLog"
 Write-Host ''
-Write-Host '  Scheduled Tasks (Task Scheduler > ZoosGlobal):' -ForegroundColor Yellow
+Write-Host '  Scheduled Task (Task Scheduler Library):' -ForegroundColor Yellow
 Write-Host ''
-Write-Host "    [EVENT] $TaskEvent"
-Write-Host '       Trigger : When any certificate is installed on this host'
-Write-Host '       Delay   : 30 seconds after install'
-Write-Host '       Runs as : NT AUTHORITY\SYSTEM'
-Write-Host ''
-Write-Host "    [WEEKLY] $TaskFallback"
+Write-Host "    $TaskName"
 Write-Host '       Trigger : Every Sunday at 02:00 AM'
-if ($infoFallback) {
-    Write-Host "       Next run: $($infoFallback.NextRunTime)"
+Write-Host '       Folder  : Root (Task Scheduler Library)'
+if ($taskInfo) {
+    Write-Host "       Next run: $($taskInfo.NextRunTime)"
 }
 Write-Host '       Runs as : NT AUTHORITY\SYSTEM'
 Write-Host ''
-Write-Host '  Manage tasks:'
-Write-Host "    Start-ScheduledTask  -TaskName '$TaskEvent'    -TaskPath '$TaskFolder'"
-Write-Host "    Start-ScheduledTask  -TaskName '$TaskFallback' -TaskPath '$TaskFolder'"
-Write-Host "    Get-ScheduledTask                              -TaskPath '$TaskFolder'"
+Write-Host '  Manage task:'
+Write-Host "    Start-ScheduledTask  -TaskName '$TaskName'"
+Write-Host "    Stop-ScheduledTask   -TaskName '$TaskName'"
+Write-Host "    Get-ScheduledTask    -TaskName '$TaskName'"
 Write-Host ''
 Write-Host '  Remove setup completely:'
-Write-Host "    Unregister-ScheduledTask -TaskName '$TaskEvent'    -TaskPath '$TaskFolder' -Confirm:`$false"
-Write-Host "    Unregister-ScheduledTask -TaskName '$TaskFallback' -TaskPath '$TaskFolder' -Confirm:`$false"
+Write-Host "    Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false"
 Write-Host "    Remove-Item -Recurse -Force '$ScriptsDir'"
 Write-Host ''
 Write-Host $SEP -ForegroundColor Cyan
