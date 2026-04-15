@@ -18,7 +18,7 @@
 #              5.  Backs up existing config before overwriting
 #              6.  Restarts Datadog Agent to apply new config
 #              7.  Validates TLS check via agent CLI
-#              8.  Generates HTML inventory report
+#              8.  Generates plain text inventory report
 #              9.  Prints final status summary
 # ------------------------------------------------------------------------------
 #  Author    : Shivam Anand
@@ -67,9 +67,9 @@ $AllowedTLS   = @('TLSv1.2', 'TLSv1.3')
 $Version      = '2.0.0'
 
 $StoresToScan = @(
-    'Cert:\LocalMachine\My',     # Personal
-    'Cert:\LocalMachine\Root',   # Trusted Root CAs
-    'Cert:\LocalMachine\CA'      # Intermediate CAs
+    'Cert:\LocalMachine\My',
+    'Cert:\LocalMachine\Root',
+    'Cert:\LocalMachine\CA'
 )
 
 $Hostname = $env:COMPUTERNAME
@@ -78,7 +78,7 @@ $SEP      = '=' * 70
 $SEP2     = '-' * 60
 
 # ==============================================================================
-#  Bootstrap — create directories
+#  Bootstrap - create directories
 # ==============================================================================
 foreach ($dir in @($ScriptRoot, $ExportBase, $LogPath, $ReportPath)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -94,16 +94,21 @@ function Write-Log {
     $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "[$ts] [$Level] [$Hostname] $Message"
     switch ($Level) {
-        'INFO'    { Write-Host "  [ .. ] $Message" -ForegroundColor Cyan    }
-        'SUCCESS' { Write-Host "  [ OK ] $Message" -ForegroundColor Green   }
-        'WARN'    { Write-Host "  [WARN] $Message" -ForegroundColor Yellow  }
-        'ERROR'   { Write-Host "  [FAIL] $Message" -ForegroundColor Red     }
-        'DEBUG'   { Write-Host "  [    ] $Message" -ForegroundColor Gray    }
+        'INFO'    { Write-Host "  [ .. ] $Message" -ForegroundColor Cyan }
+        'SUCCESS' { Write-Host "  [ OK ] $Message" -ForegroundColor Green }
+        'WARN'    { Write-Host "  [WARN] $Message" -ForegroundColor Yellow }
+        'ERROR'   { Write-Host "  [FAIL] $Message" -ForegroundColor Red }
+        'DEBUG'   { Write-Host "  [    ] $Message" -ForegroundColor Gray }
     }
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
 }
 
-function Write-Step($n, $total, $msg) {
+function Write-Step {
+    param(
+        [int]$n,
+        [int]$total,
+        [string]$msg
+    )
     Write-Host ''
     Write-Host "  [$n/$total] $msg" -ForegroundColor Yellow
     Write-Host "  $SEP2" -ForegroundColor DarkGray
@@ -118,7 +123,7 @@ Write-Host $SEP -ForegroundColor Cyan
 Write-Host '  ZOOS GLOBAL -- Datadog TLS Certificate Monitor' -ForegroundColor Cyan
 Write-Host "  Version  : $Version" -ForegroundColor Cyan
 Write-Host $SEP -ForegroundColor Cyan
-Write-Host "  Author   : Shivam Anand  |  Sr. DevOps Engineer"
+Write-Host '  Author   : Shivam Anand  |  Sr. DevOps Engineer'
 Write-Host '  Org      : Zoos Global   |  Datadog Premium Partner'
 Write-Host '  Web      : www.zoosglobal.com'
 Write-Host '  Email    : shivam.anand@zoosglobal.com'
@@ -133,16 +138,16 @@ Write-Host ''
 $TotalSteps = 5
 
 # ==============================================================================
-#  STEP 1 — Validate Datadog Agent
+#  STEP 1 - Validate Datadog Agent
 # ==============================================================================
 Write-Step 1 $TotalSteps 'Validating Datadog Agent...'
 
 try {
     $svc = Get-Service -Name $AgentSvc -ErrorAction Stop
     if ($svc.Status -eq 'Running') {
-        Write-Log "Datadog Agent is running  (Status: $($svc.Status))" 'SUCCESS'
+        Write-Log "Datadog Agent is running (Status: $($svc.Status))" 'SUCCESS'
     } else {
-        Write-Log "Datadog Agent not running (Status: $($svc.Status)) — attempting start..." 'WARN'
+        Write-Log "Datadog Agent not running (Status: $($svc.Status)) - attempting start..." 'WARN'
         Start-Service -Name $AgentSvc
         Start-Sleep -Seconds 5
         if ((Get-Service -Name $AgentSvc).Status -ne 'Running') {
@@ -163,7 +168,7 @@ try {
 }
 
 # ==============================================================================
-#  STEP 2 — Backup existing conf.yaml
+#  STEP 2 - Backup existing conf.yaml
 # ==============================================================================
 Write-Step 2 $TotalSteps 'Backing up existing conf.yaml...'
 
@@ -173,11 +178,11 @@ if (Test-Path $ConfPath) {
     Copy-Item -Path $ConfPath -Destination $BackupPath -Force
     Write-Log "Backup created : $BackupPath" 'SUCCESS'
 } else {
-    Write-Log 'No existing conf.yaml found — skipping backup.' 'INFO'
+    Write-Log 'No existing conf.yaml found - skipping backup.' 'INFO'
 }
 
 # ==============================================================================
-#  STEP 3 — Scan & Export certificates
+#  STEP 3 - Scan and export certificates
 # ==============================================================================
 Write-Step 3 $TotalSteps 'Scanning Windows Certificate Stores...'
 
@@ -190,28 +195,34 @@ foreach ($storePath in $StoresToScan) {
     $storeDir  = "$ExportBase\$storeName"
     New-Item -ItemType Directory -Force -Path $storeDir | Out-Null
 
-    try { $certs = Get-ChildItem -Path $storePath -ErrorAction Stop }
-    catch {
+    try {
+        $certs = Get-ChildItem -Path $storePath -ErrorAction Stop
+    } catch {
         Write-Log "Cannot access store '$storePath': $_" 'WARN'
         continue
     }
 
-    if (!$certs -or $certs.Count -eq 0) {
-        Write-Log "  ⬜ $storeName — 0 certs" 'WARN'
+    if (-not $certs -or $certs.Count -eq 0) {
+        Write-Log "Store $storeName - 0 certs" 'WARN'
         continue
     }
 
-    Write-Log "  ✅ $storeName — $($certs.Count) cert(s)" 'SUCCESS'
+    Write-Log "Store $storeName - $($certs.Count) cert(s)" 'SUCCESS'
 
     foreach ($cert in $certs) {
         try {
-            $safeName   = ($cert.Subject -replace '[^a-zA-Z0-9]', '_')
-            $safeName   = $safeName.Substring(0, [Math]::Min(50, $safeName.Length)).TrimEnd('_')
+            $safeName = ($cert.Subject -replace '[^a-zA-Z0-9]', '_')
+            if ([string]::IsNullOrWhiteSpace($safeName)) {
+                $safeName = 'cert'
+            }
+            $safeName = $safeName.Substring(0, [Math]::Min(50, $safeName.Length)).TrimEnd('_')
             $thumbShort = $cert.Thumbprint.Substring(0, 8)
-            $filePath   = "$storeDir\${safeName}-${thumbShort}.cer"
+            $filePath = "$storeDir\${safeName}-${thumbShort}.cer"
 
-            [System.IO.File]::WriteAllBytes($filePath,
-                $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            [System.IO.File]::WriteAllBytes(
+                $filePath,
+                $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            )
 
             $daysLeft = [math]::Round(($cert.NotAfter - (Get-Date)).TotalDays)
 
@@ -226,13 +237,13 @@ foreach ($storePath in $StoresToScan) {
             }
             $exported++
         } catch {
-            Write-Log "  Skipped '$($cert.Subject)': $_" 'WARN'
+            Write-Log "Skipped '$($cert.Subject)': $_" 'WARN'
             $skipped++
         }
     }
 }
 
-Write-Log "Scan complete — Exported: $exported | Skipped: $skipped" 'SUCCESS'
+Write-Log "Scan complete - Exported: $exported | Skipped: $skipped" 'SUCCESS'
 
 if ($exported -eq 0) {
     Write-Log 'No certificates found on this host. Exiting.' 'WARN'
@@ -240,7 +251,7 @@ if ($exported -eq 0) {
 }
 
 # ==============================================================================
-#  STEP 4 — Generate conf.yaml
+#  STEP 4 - Generate conf.yaml
 # ==============================================================================
 Write-Step 4 $TotalSteps "Generating conf.yaml ($exported instances)..."
 
@@ -281,10 +292,7 @@ foreach ($inst in $instances) {
     tags:
       - cert_store:$($inst.store)
       - host:$Hostname
-      - org:zoosglobal
       - source:windows_cert_store
-      - managed_by:zoosglobal_tls_monitor
-
 "@
 }
 
@@ -293,18 +301,20 @@ $yaml | Out-File $ConfPath -Encoding UTF8
 Write-Log "conf.yaml written : $ConfPath" 'SUCCESS'
 
 # ==============================================================================
-#  STEP 5 — Restart agent & validate (skip if DryRun)
+#  STEP 5 - Restart agent and validate (skip if DryRun)
 # ==============================================================================
 Write-Step 5 $TotalSteps 'Deploying to Datadog Agent...'
 
 if ($DryRun) {
-    Write-Log 'DryRun mode — skipping agent restart.' 'WARN'
+    Write-Log 'DryRun mode - skipping agent restart.' 'WARN'
     Write-Log "Review conf.yaml at: $ConfPath" 'INFO'
 } else {
     try {
         Restart-Service -Name $AgentSvc -Force -ErrorAction Stop
         Start-Sleep -Seconds 8
-        if ((Get-Service -Name $AgentSvc).Status -ne 'Running') { throw 'Agent did not start.' }
+        if ((Get-Service -Name $AgentSvc).Status -ne 'Running') {
+            throw 'Agent did not start.'
+        }
         Write-Log 'Agent restarted successfully.' 'SUCCESS'
     } catch {
         Write-Log "Agent restart failed: $_" 'ERROR'
@@ -319,97 +329,50 @@ if ($DryRun) {
     $out = & $AgentExe check tls 2>&1
     $ok  = ($out | Select-String '\[OK\]').Count
     $err = ($out | Select-String '\[ERROR\]').Count
-    Write-Log "Validation — OK: $ok | ERROR: $err" $(if ($err -gt 0) { 'WARN' } else { 'SUCCESS' })
+    Write-Log "Validation - OK: $ok | ERROR: $err" $(if ($err -gt 0) { 'WARN' } else { 'SUCCESS' })
 }
 
 # ==============================================================================
-#  HTML Report
+#  Plain text report
 # ==============================================================================
-$reportFile = "$ReportPath\TLSReport_${Hostname}_${RunTime}.html"
-$rows = $instances | Sort-Object daysLeft | ForEach-Object {
-    $color = if ($_.daysLeft -le $DaysCritical) { '#ff4444' }
-             elseif ($_.daysLeft -le $DaysWarning) { '#ffaa00' }
-             else { '#00cc66' }
-    "<tr>
-        <td>$($_.name)</td>
-        <td><span class='badge'>$($_.store)</span></td>
-        <td class='small'>$($_.subject)</td>
-        <td>$($_.expiry.ToString('yyyy-MM-dd'))</td>
-        <td style='color:$color;font-weight:bold;text-align:center'>$($_.daysLeft)</td>
-        <td class='small'>$($_.thumbprint)</td>
-    </tr>"
-}
-
+$reportFile = "$ReportPath\TLSReport_${Hostname}_${RunTime}.txt"
 $critical = ($instances | Where-Object { $_.daysLeft -le $DaysCritical }).Count
 $warning  = ($instances | Where-Object { $_.daysLeft -le $DaysWarning -and $_.daysLeft -gt $DaysCritical }).Count
 $healthy  = ($instances | Where-Object { $_.daysLeft -gt $DaysWarning }).Count
 
-$html = @"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='UTF-8'>
-  <title>Zoos Global - TLS Certificate Inventory | $Hostname</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Segoe UI',Arial,sans-serif;background:#0d0d1a;color:#e0e0e0;padding:24px}
-    .header{background:linear-gradient(135deg,#0a1628,#1a2a4a);border-left:4px solid #0066ff;
-            padding:20px 28px;border-radius:8px;margin-bottom:24px;
-            display:flex;align-items:center;justify-content:space-between}
-    .header h1{color:#0088ff;font-size:20px;letter-spacing:.5px}
-    .header .sub{font-size:12px;color:#8899aa;margin-top:4px}
-    .meta{text-align:right;font-size:12px;color:#8899aa}
-    .meta strong{color:#fff}
-    .stats{display:flex;gap:12px;margin-bottom:20px}
-    .stat{background:#111827;border-radius:8px;padding:14px 20px;flex:1;text-align:center;border-top:3px solid #0066ff}
-    .stat .num{font-size:28px;font-weight:700;color:#0088ff}
-    .stat.crit .num{color:#ff4444}
-    .stat.warn .num{color:#ffaa00}
-    .stat.ok   .num{color:#00cc66}
-    .stat .lbl{font-size:11px;color:#8899aa;margin-top:3px}
-    table{width:100%;border-collapse:collapse;background:#111827;border-radius:8px;overflow:hidden}
-    th{background:#0a1628;color:#0088ff;padding:11px 13px;text-align:left;font-size:11px;letter-spacing:1px;text-transform:uppercase}
-    td{padding:9px 13px;border-bottom:1px solid #1e2a3a;font-size:12px}
-    tr:hover td{background:#151f2e}
-    .badge{background:#0a2040;color:#0088ff;border-radius:4px;padding:2px 7px;font-size:11px;font-family:monospace}
-    .small{font-size:11px;color:#8899aa}
-    .footer{margin-top:20px;text-align:center;font-size:11px;color:#445566}
-    .footer a{color:#0066ff;text-decoration:none}
-  </style>
-</head>
-<body>
-  <div class='header'>
-    <div>
-      <h1>🔐 TLS Certificate Inventory</h1>
-      <div class='sub'>Zoos Global — Infrastructure &amp; Monitoring Engineering</div>
-    </div>
-    <div class='meta'>
-      <div>Host: <strong>$Hostname</strong></div>
-      <div>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</div>
-      <div>v$Version</div>
-    </div>
-  </div>
-  <div class='stats'>
-    <div class='stat'><div class='num'>$exported</div><div class='lbl'>Total Certs</div></div>
-    <div class='stat crit'><div class='num'>$critical</div><div class='lbl'>Critical (≤${DaysCritical}d)</div></div>
-    <div class='stat warn'><div class='num'>$warning</div><div class='lbl'>Warning (≤${DaysWarning}d)</div></div>
-    <div class='stat ok'><div class='num'>$healthy</div><div class='lbl'>Healthy</div></div>
-  </div>
-  <table>
-    <tr><th>Name</th><th>Store</th><th>Subject</th><th>Expiry</th><th>Days Left</th><th>Thumbprint</th></tr>
-    $($rows -join "`n")
-  </table>
-  <div class='footer'>
-    Zoos Global TLS Monitor v$Version &nbsp;|&nbsp;
-    <a href='mailto:shivam.anand@zoosglobal.com'>shivam.anand@zoosglobal.com</a> &nbsp;|&nbsp;
-    <a href='https://www.zoosglobal.com'>www.zoosglobal.com</a>
-  </div>
-</body>
-</html>
-"@
+$reportLines = @()
+$reportLines += $SEP
+$reportLines += 'Zoos Global - TLS Certificate Inventory'
+$reportLines += $SEP
+$reportLines += "Host        : $Hostname"
+$reportLines += "Generated   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+$reportLines += "Version     : $Version"
+$reportLines += "Total Certs : $exported"
+$reportLines += "Critical    : $critical"
+$reportLines += "Warning     : $warning"
+$reportLines += "Healthy     : $healthy"
+$reportLines += ''
+$reportLines += 'Certificate Details:'
+$reportLines += $SEP2
 
-$html | Out-File $reportFile -Encoding UTF8
-Write-Log "HTML report : $reportFile" 'SUCCESS'
+foreach ($item in ($instances | Sort-Object daysLeft)) {
+    $status = if ($item.daysLeft -le $DaysCritical) { 'CRITICAL' }
+              elseif ($item.daysLeft -le $DaysWarning) { 'WARNING' }
+              else { 'HEALTHY' }
+
+    $reportLines += "Name       : $($item.name)"
+    $reportLines += "Store      : $($item.store)"
+    $reportLines += "Subject    : $($item.subject)"
+    $reportLines += "Expiry     : $($item.expiry.ToString('yyyy-MM-dd'))"
+    $reportLines += "Days Left  : $($item.daysLeft)"
+    $reportLines += "Thumbprint : $($item.thumbprint)"
+    $reportLines += "Cert Path  : $($item.local_cert_path)"
+    $reportLines += "Status     : $status"
+    $reportLines += $SEP2
+}
+
+$reportLines | Out-File $reportFile -Encoding UTF8
+Write-Log "Text report : $reportFile" 'SUCCESS'
 
 # ==============================================================================
 #  Final Summary
@@ -424,7 +387,7 @@ Write-Host ''
 Write-Host "  Host        : $Hostname"
 Write-Host "  Total Certs : $exported"
 Write-Host "  Critical    : $critical" -ForegroundColor $(if ($critical -gt 0) { 'Red' } else { 'Green' })
-Write-Host "  Warning     : $warning"  -ForegroundColor $(if ($warning  -gt 0) { 'Yellow' } else { 'Green' })
+Write-Host "  Warning     : $warning"  -ForegroundColor $(if ($warning -gt 0) { 'Yellow' } else { 'Green' })
 Write-Host "  Healthy     : $healthy"  -ForegroundColor Green
 Write-Host "  Config      : $ConfPath"
 Write-Host "  Report      : $reportFile"
@@ -435,13 +398,13 @@ if ($expiring.Count -gt 0) {
     Write-Host '  Certs expiring soon:' -ForegroundColor Yellow
     $expiring | ForEach-Object {
         $color = if ($_.daysLeft -le $DaysCritical) { 'Red' } else { 'Yellow' }
-        Write-Host "    → $($_.name)  |  $($_.expiry.ToString('yyyy-MM-dd'))  ($($_.daysLeft) days)" -ForegroundColor $color
+        Write-Host "    -> $($_.name)  |  $($_.expiry.ToString('yyyy-MM-dd'))  ($($_.daysLeft) days)" -ForegroundColor $color
     }
     Write-Host ''
 }
 
 $instances | Group-Object store | ForEach-Object {
-    Write-Host "  📦 $($_.Name) : $($_.Count) cert(s)"
+    Write-Host "  [STORE] $($_.Name) : $($_.Count) cert(s)"
 }
 
 Write-Host ''
